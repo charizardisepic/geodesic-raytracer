@@ -293,42 +293,52 @@ class BlackHoleRenderer:
         # Deep space background
         return (0.01, 0.01, 0.02)  # Very dark blue
     
-    def render_image(self, camera: Camera, filename: str = "black_hole.png") -> np.ndarray:
+    def render_image(self, camera: Camera, filename: str = "black_hole.png", batch_size: int = 64, max_workers: int = 10) -> np.ndarray:
         """
-        Render a complete image of the black hole.
-        
-        Args:
-            camera: Camera configuration
-            filename: Output filename
-            
-        Returns:
-            RGB image array
+        Render a complete image of the black hole using batch geodesic integration with progress bar.
         """
-        print(f"Rendering {camera.width}x{camera.height} image...")
-        
-        # Initialize image array
+        print(f"Rendering {camera.width}x{camera.height} image (batch mode)...")
         image = np.zeros((camera.height, camera.width, 3))
-        
-        # Progress bar for rendering
         total_pixels = camera.width * camera.height
-        
+        rays = []
+        pixel_indices = []
+        # Prepare all rays and initial conditions (parallelized)
+        from concurrent.futures import ThreadPoolExecutor
+        def prepare_ray(args):
+            x, y = args
+            ray = camera.generate_ray(x, y)
+            initial_conditions = self.geodesic_integrator.initial_conditions_from_observer(ray.origin, ray.direction)
+            return (initial_conditions, (y, x))
+        coords = [(x, y) for y in range(camera.height) for x in range(camera.width)]
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = list(executor.map(prepare_ray, coords))
+        initial_conditions_list = [ic for ic, idx in results]
+        pixel_indices = [idx for ic, idx in results]
+        # Batch integration with progress bar
+        print("Tracing rays in parallel...")
+        from tqdm import tqdm
+        image_results = [None] * total_pixels
         with tqdm(total=total_pixels, desc="Raytracing") as pbar:
-            for y in range(camera.height):
-                for x in range(camera.width):
-                    # Generate ray for this pixel
-                    ray = camera.generate_ray(x, y)
-                    
-                    # Trace the ray
-                    color = self.trace_ray(ray)
-                    
-                    # Store color in image
+            # Process in batches
+            for batch_start in range(0, total_pixels, batch_size):
+                batch_end = min(batch_start + batch_size, total_pixels)
+                batch_ics = initial_conditions_list[batch_start:batch_end]
+                batch_indices = pixel_indices[batch_start:batch_end]
+                batch_results = self.geodesic_integrator.batch_integrate_geodesics(batch_ics, max_steps=5000, max_workers=max_workers)
+                for i, (trajectory, escaped) in enumerate(batch_results):
+                    y, x = batch_indices[i]
+                    if not escaped:
+                        color = (0.0, 0.0, 0.0)
+                    else:
+                        color = self._check_disk_intersection(trajectory)
+                        if color is None:
+                            final_position = trajectory[-1]
+                            final_theta = final_position[2]
+                            final_phi = final_position[3]
+                            color = self._sample_background_stars(final_theta, final_phi)
                     image[y, x] = color
-                    
                     pbar.update(1)
-        
-        # Save image
         self._save_image(image, filename)
-        
         return image
     
     def _save_image(self, image: np.ndarray, filename: str):

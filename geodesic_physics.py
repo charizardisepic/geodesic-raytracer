@@ -6,7 +6,8 @@ in curved spacetime around black holes using the Schwarzschild metric.
 """
 
 import numpy as np
-from numba import njit
+from numba import njit, prange
+import concurrent.futures
 from typing import Tuple, List, Optional
 import warnings
 
@@ -167,6 +168,43 @@ def geodesic_equation(tau: float, y: np.ndarray, M: float = 1.0) -> np.ndarray:
     
     return dydt
 
+@njit(parallel=True)
+def integrate_geodesic_numba(initial_conditions: np.ndarray, M: float, step_size: float, max_steps: int, min_r: float, max_r: float) -> Tuple[np.ndarray, bool]:
+    """
+    Numba-optimized geodesic integration loop (single ray).
+    """
+    rs = 2.0 * M
+    trajectory = np.empty((max_steps, 8))
+    y = initial_conditions.copy()
+    tau = 0.0
+    success = False
+    for step in range(max_steps):
+        trajectory[step, :] = y
+        r = y[1]
+        if r < min_r:
+            return trajectory[:step+1], False
+        if r > max_r:
+            success = True
+            return trajectory[:step+1], True
+        y = runge_kutta_4_numba(y, tau, step_size, M)
+        tau += step_size
+        # Ensure theta stays in valid range
+        if y[2] < 0:
+            y[2] = -y[2]
+            y[6] = -y[6]
+        elif y[2] > np.pi:
+            y[2] = 2*np.pi - y[2]
+            y[6] = -y[6]
+    return trajectory, success
+
+@njit
+def runge_kutta_4_numba(y: np.ndarray, tau: float, h: float, M: float) -> np.ndarray:
+    k1 = geodesic_equation(tau, y, M)
+    k2 = geodesic_equation(tau + h/2, y + h*k1/2, M)
+    k3 = geodesic_equation(tau + h/2, y + h*k2/2, M)
+    k4 = geodesic_equation(tau + h, y + h*k3, M)
+    return y + h * (k1 + 2*k2 + 2*k3 + k4) / 6
+
 class GeodesicIntegrator:
     """
     Numerical integrator for computing geodesic paths in curved spacetime.
@@ -206,51 +244,28 @@ class GeodesicIntegrator:
     def integrate_geodesic(self, initial_conditions: np.ndarray, max_steps: int = 10000,
                           min_r: float = None, max_r: float = 100.0) -> Tuple[np.ndarray, bool]:
         """
-        Integrate a geodesic from initial conditions.
-        
-        Args:
-            initial_conditions: [t, r, theta, phi, dt/dtau, dr/dtau, dtheta/dtau, dphi/dtau]
-            max_steps: Maximum integration steps
-            min_r: Minimum radius (default: 1.1 * rs)
-            max_r: Maximum radius for termination
-            
-        Returns:
-            Tuple of (trajectory array, success flag)
+        Integrate a geodesic from initial conditions. Uses Numba-optimized loop.
         """
         if min_r is None:
             min_r = 1.1 * self.rs
-            
-        trajectory = []
-        y = initial_conditions.copy()
-        tau = 0.0
-        
-        for step in range(max_steps):
-            trajectory.append(y.copy())
-            
-            # Check termination conditions
-            r = y[1]
-            
-            # Ray absorbed by black hole
-            if r < min_r:
-                return np.array(trajectory), False
-                
-            # Ray escaped to infinity
-            if r > max_r:
-                return np.array(trajectory), True
-                
-            # Integrate one step
-            y = self.runge_kutta_4(y, tau, self.step_size)
-            tau += self.step_size
-            
-            # Ensure theta stays in valid range
-            if y[2] < 0:
-                y[2] = -y[2]
-                y[6] = -y[6]  # Reverse theta velocity
-            elif y[2] > np.pi:
-                y[2] = 2*np.pi - y[2]
-                y[6] = -y[6]
-                
-        return np.array(trajectory), False
+        traj, success = integrate_geodesic_numba(initial_conditions, self.M, self.step_size, max_steps, min_r, max_r)
+        return traj, success
+
+    def batch_integrate_geodesics(self, initial_conditions_list: List[np.ndarray], max_steps: int = 10000,
+                                  min_r: float = None, max_r: float = 100.0, max_workers: int = 8) -> List[Tuple[np.ndarray, bool]]:
+        """
+        Integrate multiple geodesics in parallel using threads.
+        """
+        if min_r is None:
+            min_r = 1.1 * self.rs
+        results = []
+        def worker(ic):
+            return integrate_geodesic_numba(ic, self.M, self.step_size, max_steps, min_r, max_r)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(worker, ic) for ic in initial_conditions_list]
+            for f in concurrent.futures.as_completed(futures):
+                results.append(f.result())
+        return results
     
     def initial_conditions_from_observer(self, observer_pos: np.ndarray, 
                                        ray_direction: np.ndarray) -> np.ndarray:
