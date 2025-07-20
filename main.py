@@ -37,20 +37,24 @@ def main():
     
     # Initialize renderer
     renderer = BlackHoleRenderer(black_hole_mass=args.mass)
-    
     # Set up camera for optimal black hole viewing
-    # Position observer closer for better black hole visibility
-    observer_distance = max(8.0, args.distance * 0.4)  # Closer viewing for better visibility
-    observer_position = np.array([0.0, observer_distance, np.pi/2, 0.0])  # [t, r, theta, phi]
-    look_at_point = np.array([0.0, 2.5, np.pi/2, 0.0])  # Look toward black hole center
-    up_vector = np.array([0.0, 0.0, 1.0])  # z-direction up
+    # Position observer at a good distance and angle to see the complete scene
+    observer_distance = args.distance  # Use the distance specified by the user
     
-    # Create camera
+    # Position slightly above the disk plane and at an angle for best visual effect
+    theta_offset = 0.3  # About 17 degrees above equatorial plane
+    observer_position = np.array([0.0, observer_distance, np.pi/2 + theta_offset, 0.0])
+    
+    # Look directly at the black hole center
+    look_at_point = np.array([0.0, 0.0, np.pi/2, 0.0])
+    up_vector = np.array([0.0, 0.0, 1.0])  # z-direction up
+
+    # Create camera with narrow field of view for focused black hole view
     camera = Camera(
         position=observer_position,
         look_at=look_at_point,
         up_vector=up_vector,
-        fov=np.pi/3,  # 60 degrees field of view
+        fov=np.pi/8,  # 22.5 degrees field of view for focused view with less distortion
         width=args.width,
         height=args.height
     )
@@ -91,20 +95,24 @@ def quick_demo():
     """
     print("Running quick black hole raytracing demo...")
     
-    # Small, fast render
+    # Small, fast render with optimal viewing parameters
     renderer = BlackHoleRenderer(black_hole_mass=1.0)
     
+    # Position camera for dramatic black hole view
+    observer_distance = 12.0  # Very close for strong lensing effects
+    theta_offset = 0.3  # Above the disk plane
+    
     camera = Camera(
-        position=np.array([0.0, 10.0, np.pi/2, 0.0]),  # Observer at r=10
-        look_at=np.array([0.0, 0.0, np.pi/2, 0.0]),   # Looking at black hole
+        position=np.array([0.0, observer_distance, np.pi/2 + theta_offset, 0.0]),
+        look_at=np.array([0.0, 0.0, np.pi/2, 0.0]),   # Looking at black hole center
         up_vector=np.array([0.0, 0.0, 1.0]),
-        fov=np.pi/3,  # 60 degrees
+        fov=np.pi/4,  # 45 degrees for good scene coverage
         width=400,
         height=300
     )
     
-    image = renderer.render_image(camera, "output/output.png")
-    print("Demo complete! Check output/output.png")
+    image = renderer.render_image(camera, "output/demo_black_hole.png")
+    print("Demo complete! Check output/demo_black_hole.png")
     
     return image
 
