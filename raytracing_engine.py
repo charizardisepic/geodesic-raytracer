@@ -15,7 +15,8 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from tqdm import tqdm
 from geodesic_physics import GeodesicIntegrator
-from numba import njit
+import os
+import multiprocessing
 
 @dataclass
 class Ray:
@@ -39,9 +40,6 @@ class Camera:
     
     def setup_coordinate_system(self):
         """Set up local coordinate system for the camera."""
-        # For simplicity, we'll work in a local Cartesian system
-        # and convert to spherical coordinates when needed
-        
         # Camera forward direction (towards black hole typically)
         forward = np.array([0, -1, 0])  # Initially pointing inward radially
         
@@ -52,7 +50,7 @@ class Camera:
     
     def generate_ray(self, pixel_x: int, pixel_y: int) -> Ray:
         """
-        Generate a ray for a given pixel.
+        Generate a ray for a given pixel with perfect coordinate symmetry.
         
         Args:
             pixel_x: X pixel coordinate (0 to width-1)
@@ -79,19 +77,13 @@ class Camera:
         screen_y *= tan_half_fov
         
         # Convert screen coordinates to ray direction in spherical coordinates
-        # This is a simplified mapping - in full GR, we'd need to account for
-        # the curvature of spacetime affecting the camera's local coordinates
-        
         t, r, theta, phi = self.position
         
         # Local ray direction components
-        # dt component (time-like)
         dt = 1.0
-        
-        # Spatial components (approximate for distant observer)
         dr = -1.0  # Generally pointing toward black hole
-        dtheta = screen_y * 0.1  # Small perturbation in theta
-        dphi = screen_x * 0.1    # Small perturbation in phi
+        dtheta = screen_y * 0.8  # Angular range for proper impact parameters
+        dphi = screen_x * 0.8    # Angular range for proper impact parameters
         
         ray_direction = np.array([dt, dr, dtheta, dphi])
         
@@ -170,7 +162,7 @@ class AccretionDisk:
         
         # Check if close to equatorial plane
         disk_half_angle = self.thickness / r
-        theta_from_equator = abs(theta - np.pi/2)
+        theta_from_equator = np.abs(theta - np.pi/2)
         
         return theta_from_equator < disk_half_angle
 
@@ -190,28 +182,30 @@ class BlackHoleRenderer:
         self.geodesic_integrator = GeodesicIntegrator(M=black_hole_mass)
         self.accretion_disk = AccretionDisk()
         self.background_stars = self._generate_background_stars()
+        
+        # Warm up Numba JIT compilation for immediate performance
+        self._warmup_numba()
     
-    def _generate_background_stars(self, num_stars: int = 1000) -> List[Tuple[float, float, float]]:
+    def _warmup_numba(self):
+        """Pre-compile Numba functions for immediate fast performance."""
+        # Create a dummy initial condition to trigger Numba compilation
+        dummy_ic = np.array([0.0, 20.0, np.pi/2, 0.0, 1.0, -1.0, 0.0, 0.1])
+        # Run a single fast integration to compile functions
+        from geodesic_physics import integrate_geodesic_numba
+        integrate_geodesic_numba(dummy_ic, self.black_hole_mass, 0.5, 10, 2.1, 30.0)
+
+    def _generate_background_stars(self, num_stars: int = 0) -> List[Tuple[float, float, float]]:
         """Generate random background stars for realistic appearance."""
-        stars = []
-        np.random.seed(42)  # Reproducible star field
-        
-        for _ in range(num_stars):
-            # Random position on celestial sphere
-            theta = np.random.uniform(0, np.pi)
-            phi = np.random.uniform(0, 2*np.pi)
-            brightness = np.random.exponential(0.3)  # Exponential brightness distribution
-            stars.append((theta, phi, min(brightness, 1.0)))
-        
-        return stars
+        # For simple scene demo, disable stars (white background only)
+        return []
     
-    def trace_ray(self, ray: Ray, max_steps: int = 5000) -> Tuple[float, float, float]:
+    def trace_ray(self, ray: Ray, max_steps: int = 2000) -> Tuple[float, float, float]:
         """
         Trace a single ray through curved spacetime.
         
         Args:
             ray: Ray to trace
-            max_steps: Maximum integration steps
+            max_steps: Maximum integration steps (reduced for speed)
             
         Returns:
             RGB color tuple for the ray
@@ -230,10 +224,10 @@ class BlackHoleRenderer:
             # Ray was absorbed by black hole - return black
             return (0.0, 0.0, 0.0)
         
-        # Check for intersections with accretion disk
-        color = self._check_disk_intersection(trajectory)
-        if color is not None:
-            return color
+        # Check for intersections with accretion disk (disabled for simple scene)
+        # color = self._check_disk_intersection(trajectory)
+        # if color is not None:
+        #     return color
         
         # Check background stars
         final_position = trajectory[-1]
@@ -263,87 +257,137 @@ class BlackHoleRenderer:
     
     def _sample_background_stars(self, theta: float, phi: float) -> Tuple[float, float, float]:
         """
-        Sample background star field at given direction.
+        Sample background starscape at given direction.
         
         Args:
             theta: Polar angle
             phi: Azimuthal angle
             
         Returns:
-            RGB color from star field
+            RGB color from starscape
         """
-        # Normalize angles
         theta = theta % np.pi
         phi = phi % (2 * np.pi)
         
-        # Check if close to any star
-        star_radius = 0.05  # Angular radius for star visibility
+        # Create a pseudo-random starfield using deterministic noise
+        # Use spherical coordinates as seed for consistent star placement
         
-        for star_theta, star_phi, brightness in self.background_stars:
-            # Angular distance to star
-            cos_dist = (np.cos(theta) * np.cos(star_theta) + 
-                       np.sin(theta) * np.sin(star_theta) * np.cos(phi - star_phi))
-            angular_distance = np.arccos(np.clip(cos_dist, -1, 1))
+        # Convert spherical coordinates to deterministic star positions
+        coord_hash = np.sin(theta * 37.3) * np.cos(phi * 23.7) + np.sin(phi * 41.1) * np.cos(theta * 19.4)
+        coord_hash = (coord_hash + 1.0) / 2.0  # Normalize to [0, 1]
+        
+        # Create multiple octaves of star noise for realistic distribution
+        star_density = 0.01  # Increased probability for better visibility of distortion
+        
+        # Generate star positions using multiple hash functions
+        hash1 = abs(np.sin(theta * 127.1 + phi * 311.7) * 43758.5453)
+        hash2 = abs(np.sin(theta * 269.5 + phi * 183.3) * 43758.5453)
+        hash3 = abs(np.sin(theta * 419.2 + phi * 371.9) * 43758.5453)
+        
+        # Add some bright reference stars for clear distortion visibility
+        # Create a few bright stars at specific locations
+        bright_star_hash = abs(np.sin(theta * 73.7 + phi * 157.3) * 43758.5453)
+        bright_star_hash = bright_star_hash - int(bright_star_hash)
+        
+        if bright_star_hash < 0.005:  # Bright reference stars
+            brightness = 0.8 + 0.2 * hash2
+            return (brightness, brightness * 0.9, brightness * 0.7)  # Bright yellow-white
+        
+        # Extract fractional parts for randomness
+        hash1 = hash1 - int(hash1)
+        hash2 = hash2 - int(hash2)
+        hash3 = hash3 - int(hash3)
+        
+        # Check if we have a star at this location
+        if hash1 < star_density:
+            # Star brightness varies
+            brightness = 0.3 + 0.7 * hash2
             
-            if angular_distance < star_radius:
-                # Star brightness based on distance to star center
-                star_intensity = brightness * (1.0 - angular_distance / star_radius)
-                return (star_intensity, star_intensity, star_intensity)
+            # Star color varies (blue-white to yellow-white)
+            if hash3 < 0.1:  # Blue giants (rare)
+                return (brightness * 0.7, brightness * 0.8, brightness * 1.0)
+            elif hash3 < 0.3:  # White stars
+                return (brightness, brightness, brightness)
+            elif hash3 < 0.7:  # Yellow-white stars
+                return (brightness * 1.0, brightness * 0.95, brightness * 0.8)
+            else:  # Red giants
+                return (brightness * 1.0, brightness * 0.7, brightness * 0.5)
         
-        # Deep space background
-        return (0.01, 0.01, 0.02)  # Very dark blue
+        # Background space color - very dark blue/black
+        return (0.02, 0.02, 0.05)
     
-    def render_image(self, camera: Camera, filename: str = "black_hole.png", batch_size: int = 64, max_workers: int = 10) -> np.ndarray:
+    def render_image(self, camera: Camera, filename: str = "black_hole.png", batch_size: int = 250, max_workers: int = 1) -> np.ndarray:
         """
         Render a complete image of the black hole using batch geodesic integration with progress bar.
         """
         print(f"Rendering {camera.width}x{camera.height} image (batch mode)...")
         image = np.zeros((camera.height, camera.width, 3))
         total_pixels = camera.width * camera.height
-        rays = []
-        pixel_indices = []
-        # Prepare all rays and initial conditions (parallelized)
-        from concurrent.futures import ThreadPoolExecutor
-        def prepare_ray(args):
-            x, y = args
-            ray = camera.generate_ray(x, y)
-            initial_conditions = self.geodesic_integrator.initial_conditions_from_observer(ray.origin, ray.direction)
-            return (initial_conditions, (y, x))
-        coords = [(x, y) for y in range(camera.height) for x in range(camera.width)]
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = list(executor.map(prepare_ray, coords))
-        initial_conditions_list = [ic for ic, idx in results]
-        pixel_indices = [idx for ic, idx in results]
-        # Batch integration with progress bar
+        
+        # Vectorized ray preparation with FIXED symmetric coordinates
+        xs, ys = np.meshgrid(np.arange(camera.width), np.arange(camera.height))
+        xs = xs.flatten()
+        ys = ys.flatten()
+        
+        # Precompute all ray directions in a single batch
+        ndc_x = (xs + 0.5) / camera.width
+        ndc_y = (ys + 0.5) / camera.height
+        screen_x = 2.0 * ndc_x - 1.0
+        screen_y = 1.0 - 2.0 * ndc_y
+        aspect_ratio = camera.width / camera.height
+        screen_x *= aspect_ratio
+        tan_half_fov = np.tan(camera.fov / 2.0)
+        screen_x *= tan_half_fov
+        screen_y *= tan_half_fov
+        
+        t, r, theta, phi = camera.position
+        dt = np.ones_like(xs)
+        dr = -np.ones_like(xs)
+        dtheta = screen_y * 0.8
+        dphi = screen_x * 0.8
+        
+        ray_origins = np.tile(camera.position, (total_pixels, 1))
+        ray_directions = np.stack([dt, dr, dtheta, dphi], axis=1)
+        
+        # Fast vectorized initial conditions (no loops)
+        print("Preparing initial conditions...")
+        initial_conditions_array = self.geodesic_integrator.batch_initial_conditions_from_observer(ray_origins, ray_directions)
+        pixel_indices = list(zip(ys, xs))
+        
         print("Tracing rays in parallel...")
         from tqdm import tqdm
-        image_results = [None] * total_pixels
         with tqdm(total=total_pixels, desc="Raytracing") as pbar:
-            # Process in batches
+            # Process in larger batches for efficiency
             for batch_start in range(0, total_pixels, batch_size):
                 batch_end = min(batch_start + batch_size, total_pixels)
-                batch_ics = initial_conditions_list[batch_start:batch_end]
+                batch_ics = [initial_conditions_array[i] for i in range(batch_start, batch_end)]
                 batch_indices = pixel_indices[batch_start:batch_end]
-                batch_results = self.geodesic_integrator.batch_integrate_geodesics(batch_ics, max_steps=5000, max_workers=max_workers)
+                
+                # Use appropriate integration settings for accuracy
+                batch_results = self.geodesic_integrator.batch_integrate_geodesics(
+                    batch_ics, max_steps=2000, max_workers=max_workers
+                )
+                
                 for i, (trajectory, escaped) in enumerate(batch_results):
                     y, x = batch_indices[i]
                     if not escaped:
-                        color = (0.0, 0.0, 0.0)
+                        color = (0.0, 0.0, 0.0)  # Black hole
                     else:
-                        color = self._check_disk_intersection(trajectory)
-                        if color is None:
-                            final_position = trajectory[-1]
-                            final_theta = final_position[2]
-                            final_phi = final_position[3]
-                            color = self._sample_background_stars(final_theta, final_phi)
+                        # Skip disk intersection for simple scene performance
+                        # color = self._check_disk_intersection(trajectory)
+                        # if color is None:
+                        final_position = trajectory[-1]
+                        final_theta = final_position[2]
+                        final_phi = final_position[3]
+                        color = self._sample_background_stars(final_theta, final_phi)
                     image[y, x] = color
                     pbar.update(1)
+        
         self._save_image(image, filename)
         return image
     
     def _save_image(self, image: np.ndarray, filename: str):
         """Save rendered image to file."""
-        # Convert to 8-bit RGB
         image_8bit = (np.clip(image, 0, 1) * 255).astype(np.uint8)
         
         # Save using PIL
@@ -372,4 +416,4 @@ class BlackHoleRenderer:
             height=int(camera.height * scale_factor)
         )
         
-        return self.render_image(preview_camera, "black_hole_preview.png")
+        return self.render_image(preview_camera, "output/output.png")

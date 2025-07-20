@@ -6,10 +6,10 @@ in curved spacetime around black holes using the Schwarzschild metric.
 """
 
 import numpy as np
-from numba import njit, prange
-import concurrent.futures
 from typing import Tuple, List, Optional
 import warnings
+import concurrent.futures
+from numba import jit, njit
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
@@ -46,7 +46,6 @@ def schwarzschild_metric_components(r: float, theta: float, M: float = 1.0) -> T
     
     return g_tt, g_rr, g_theta_theta, g_phi_phi
 
-@njit
 def christoffel_symbols(r: float, theta: float, M: float = 1.0) -> np.ndarray:
     """
     Calculate the Christoffel symbols for the Schwarzschild metric.
@@ -107,20 +106,9 @@ def christoffel_symbols(r: float, theta: float, M: float = 1.0) -> np.ndarray:
     return gamma
 
 @njit
-def geodesic_equation(tau: float, y: np.ndarray, M: float = 1.0) -> np.ndarray:
+def geodesic_equation_accurate(y: np.ndarray, M: float = 1.0) -> np.ndarray:
     """
-    The geodesic equation for light rays in Schwarzschild spacetime.
-    
-    This implements the second-order differential equation:
-    d²xᵘ/dτ² + Γᵘᵥₚ (dxᵥ/dτ)(dxᵖ/dτ) = 0
-    
-    Args:
-        tau: Affine parameter (proper time)
-        y: State vector [t, r, theta, phi, dt/dtau, dr/dtau, dtheta/dtau, dphi/dtau]
-        M: Black hole mass
-        
-    Returns:
-        Derivative vector dy/dtau
+    Accurate geodesic equation for light rays in Schwarzschild spacetime.
     """
     # Extract position and velocity
     t, r, theta, phi = y[0], y[1], y[2], y[3]
@@ -135,40 +123,59 @@ def geodesic_equation(tau: float, y: np.ndarray, M: float = 1.0) -> np.ndarray:
     elif theta >= np.pi - 1e-10:
         theta = np.pi - 1e-10
     
-    # Calculate Christoffel symbols
-    gamma = christoffel_symbols(r, theta, M)
+    # Calculate factors
+    factor = 1.0 - rs / r
+    sin_theta = np.sin(theta)
+    cos_theta = np.cos(theta)
     
-    # Initialize acceleration components
-    d2t_dtau2 = 0.0
-    d2r_dtau2 = 0.0
-    d2theta_dtau2 = 0.0
-    d2phi_dtau2 = 0.0
+    # Non-zero Christoffel symbols for Schwarzschild metric (key terms)
+    # Γᵗᵗʳ = Γᵗʳᵗ
+    gamma_ttr = rs / (2.0 * r * r * factor)
     
-    # Velocity vector
-    velocity = np.array([dt_dtau, dr_dtau, dtheta_dtau, dphi_dtau])
+    # Γʳᵗᵗ  
+    gamma_rtt = rs * factor / (2.0 * r * r)
     
-    # Compute acceleration using geodesic equation
-    for mu in range(4):
-        for nu in range(4):
-            for sigma in range(4):
-                if mu == 0:
-                    d2t_dtau2 -= gamma[0, nu, sigma] * velocity[nu] * velocity[sigma]
-                elif mu == 1:
-                    d2r_dtau2 -= gamma[1, nu, sigma] * velocity[nu] * velocity[sigma]
-                elif mu == 2:
-                    d2theta_dtau2 -= gamma[2, nu, sigma] * velocity[nu] * velocity[sigma]
-                elif mu == 3:
-                    d2phi_dtau2 -= gamma[3, nu, sigma] * velocity[nu] * velocity[sigma]
+    # Γʳʳʳ
+    gamma_rrr = -rs / (2.0 * r * r * factor)
     
-    # Return derivative vector
-    dydt = np.array([
+    # Γʳᶿᶿ
+    gamma_rtheta_theta = -(r - rs)
+    
+    # Γʳᶠᶠ
+    gamma_rphi_phi = -(r - rs) * sin_theta * sin_theta
+    
+    # Γᶿʳᶿ = Γᶿᶿʳ
+    gamma_theta_r_theta = 1.0 / r
+    
+    # Γᶿᶠᶠ
+    gamma_theta_phi_phi = -sin_theta * cos_theta
+    
+    # Γᶠʳᶠ = Γᶠᶠʳ
+    gamma_phi_r_phi = 1.0 / r
+    
+    # Γᶠᶿᶠ = Γᶠᶠᶿ
+    gamma_phi_theta_phi = cos_theta / sin_theta
+    
+    # Compute accelerations
+    d2t_dtau2 = -2.0 * gamma_ttr * dt_dtau * dr_dtau
+    
+    d2r_dtau2 = (-gamma_rtt * dt_dtau * dt_dtau - 
+                 gamma_rrr * dr_dtau * dr_dtau -
+                 gamma_rtheta_theta * dtheta_dtau * dtheta_dtau -
+                 gamma_rphi_phi * dphi_dtau * dphi_dtau)
+    
+    d2theta_dtau2 = (-2.0 * gamma_theta_r_theta * dr_dtau * dtheta_dtau -
+                     gamma_theta_phi_phi * dphi_dtau * dphi_dtau)
+    
+    d2phi_dtau2 = (-2.0 * gamma_phi_r_phi * dr_dtau * dphi_dtau -
+                   2.0 * gamma_phi_theta_phi * dtheta_dtau * dphi_dtau)
+    
+    return np.array([
         dt_dtau, dr_dtau, dtheta_dtau, dphi_dtau,
         d2t_dtau2, d2r_dtau2, d2theta_dtau2, d2phi_dtau2
     ])
-    
-    return dydt
 
-@njit(parallel=True)
+@njit
 def integrate_geodesic_numba(initial_conditions: np.ndarray, M: float, step_size: float, max_steps: int, min_r: float, max_r: float) -> Tuple[np.ndarray, bool]:
     """
     Numba-optimized geodesic integration loop (single ray).
@@ -186,7 +193,13 @@ def integrate_geodesic_numba(initial_conditions: np.ndarray, M: float, step_size
         if r > max_r:
             success = True
             return trajectory[:step+1], True
-        y = runge_kutta_4_numba(y, tau, step_size, M)
+        # Simplified RK4 call
+        k1 = geodesic_equation_accurate(y, M)
+        k2 = geodesic_equation_accurate(y + step_size*k1/2, M)
+        k3 = geodesic_equation_accurate(y + step_size*k2/2, M)
+        k4 = geodesic_equation_accurate(y + step_size*k3, M)
+        y = y + step_size * (k1 + 2*k2 + 2*k3 + k4) / 6
+        
         tau += step_size
         # Ensure theta stays in valid range
         if y[2] < 0:
@@ -199,10 +212,10 @@ def integrate_geodesic_numba(initial_conditions: np.ndarray, M: float, step_size
 
 @njit
 def runge_kutta_4_numba(y: np.ndarray, tau: float, h: float, M: float) -> np.ndarray:
-    k1 = geodesic_equation(tau, y, M)
-    k2 = geodesic_equation(tau + h/2, y + h*k1/2, M)
-    k3 = geodesic_equation(tau + h/2, y + h*k2/2, M)
-    k4 = geodesic_equation(tau + h, y + h*k3, M)
+    k1 = geodesic_equation_accurate(y, M)
+    k2 = geodesic_equation_accurate(y + h*k1/2, M)
+    k3 = geodesic_equation_accurate(y + h*k2/2, M)
+    k4 = geodesic_equation_accurate(y + h*k3, M)
     return y + h * (k1 + 2*k2 + 2*k3 + k4) / 6
 
 class GeodesicIntegrator:
@@ -210,16 +223,16 @@ class GeodesicIntegrator:
     Numerical integrator for computing geodesic paths in curved spacetime.
     """
     
-    def __init__(self, M: float = 1.0, step_size: float = 0.01):
+    def __init__(self, M: float = 1.0, step_size: float = 0.05):
         """
         Initialize the geodesic integrator.
         
         Args:
             M: Black hole mass in geometric units
-            step_size: Integration step size
+            step_size: Integration step size (reduced for stability)
         """
         self.M = M
-        self.step_size = step_size
+        self.step_size = step_size  # Reduced to 0.05 for stability
         self.rs = 2.0 * M  # Schwarzschild radius
     
     def runge_kutta_4(self, y: np.ndarray, tau: float, h: float) -> np.ndarray:
@@ -234,15 +247,15 @@ class GeodesicIntegrator:
         Returns:
             Updated state vector
         """
-        k1 = geodesic_equation(tau, y, self.M)
-        k2 = geodesic_equation(tau + h/2, y + h*k1/2, self.M)
-        k3 = geodesic_equation(tau + h/2, y + h*k2/2, self.M)
-        k4 = geodesic_equation(tau + h, y + h*k3, self.M)
+        k1 = geodesic_equation_accurate(y, self.M)
+        k2 = geodesic_equation_accurate(y + h*k1/2, self.M)
+        k3 = geodesic_equation_accurate(y + h*k2/2, self.M)
+        k4 = geodesic_equation_accurate(y + h*k3, self.M)
         
         return y + h * (k1 + 2*k2 + 2*k3 + k4) / 6
     
-    def integrate_geodesic(self, initial_conditions: np.ndarray, max_steps: int = 10000,
-                          min_r: float = None, max_r: float = 100.0) -> Tuple[np.ndarray, bool]:
+    def integrate_geodesic(self, initial_conditions: np.ndarray, max_steps: int = 2000,
+                          min_r: float = None, max_r: float = 50.0) -> Tuple[np.ndarray, bool]:
         """
         Integrate a geodesic from initial conditions. Uses Numba-optimized loop.
         """
@@ -251,8 +264,8 @@ class GeodesicIntegrator:
         traj, success = integrate_geodesic_numba(initial_conditions, self.M, self.step_size, max_steps, min_r, max_r)
         return traj, success
 
-    def batch_integrate_geodesics(self, initial_conditions_list: List[np.ndarray], max_steps: int = 10000,
-                                  min_r: float = None, max_r: float = 100.0, max_workers: int = 8) -> List[Tuple[np.ndarray, bool]]:
+    def batch_integrate_geodesics(self, initial_conditions_list: List[np.ndarray], max_steps: int = 2000,
+                                  min_r: float = None, max_r: float = 50.0, max_workers: int = 1) -> List[Tuple[np.ndarray, bool]]:
         """
         Integrate multiple geodesics in parallel using threads.
         """
@@ -279,27 +292,66 @@ class GeodesicIntegrator:
         Returns:
             Initial conditions array for geodesic integration
         """
-        # Normalize ray direction to satisfy null geodesic condition
         # For light rays: gμν dxμ/dλ dxν/dλ = 0
         
         t, r, theta, phi = observer_pos
         dt, dr, dtheta, dphi = ray_direction
         
-        # Get metric components
+        # Get metric components at observer position
         g_tt, g_rr, g_theta_theta, g_phi_phi = schwarzschild_metric_components(r, theta, self.M)
         
-        # Solve null condition: g_tt dt² + g_rr dr² + g_theta_theta dtheta² + g_phi_phi dphi² = 0
-        # Assume dt = 1 (can always rescale affine parameter)
-        dt = 1.0
+        # For null geodesics: g_tt dt² + g_rr dr² + g_theta_theta dtheta² + g_phi_phi dphi² = 0
+        # Since g_tt < 0, we have: |g_tt| dt² = g_rr dr² + g_theta_theta dtheta² + g_phi_phi dphi²
         
-        # The spatial part must satisfy: dr² + (r²)dtheta² + (r²sin²θ)dphi² = (1 - rs/r)
-        spatial_norm_sq = dr*dr/g_rr + dtheta*dtheta/g_theta_theta + dphi*dphi/g_phi_phi
+        # Normalize the spatial part first
+        spatial_norm_sq = g_rr * dr*dr + g_theta_theta * dtheta*dtheta + g_phi_phi * dphi*dphi
         
         if spatial_norm_sq > 0:
-            # Normalize spatial components
-            normalization = np.sqrt(-g_tt / spatial_norm_sq)
-            dr *= normalization  
-            dtheta *= normalization
-            dphi *= normalization
+            # Set dt such that null condition is satisfied
+            # |g_tt| dt² = spatial_norm_sq, so dt = sqrt(spatial_norm_sq / |g_tt|)
+            dt = np.sqrt(spatial_norm_sq / abs(g_tt))
+        else:
+            # Pure time-like ray (shouldn't happen for light)
+            dt = 1.0
         
         return np.array([t, r, theta, phi, dt, dr, dtheta, dphi])
+
+    def batch_initial_conditions_from_observer(self, observer_pos: np.ndarray, ray_direction: np.ndarray) -> np.ndarray:
+        """
+        Fully vectorized initial conditions setup for a batch of rays.
+        Args:
+            observer_pos: shape (N, 4) array of [t, r, theta, phi] for each observer
+            ray_direction: shape (N, 4) array of [dt, dr, dtheta, dphi] for each ray
+        Returns:
+            shape (N, 8) array of initial conditions for geodesic integration
+        """
+        t = observer_pos[:, 0]
+        r = observer_pos[:, 1] 
+        theta = observer_pos[:, 2]
+        phi = observer_pos[:, 3]
+        dt = ray_direction[:, 0]
+        dr = ray_direction[:, 1]
+        dtheta = ray_direction[:, 2]
+        dphi = ray_direction[:, 3]
+        
+        # Vectorized metric components calculation
+        rs = 2.0 * self.M
+        r = np.maximum(r, rs + 1e-10)  # Avoid singularities
+        factor = 1.0 - rs / r
+        sin_theta = np.sin(theta)
+        
+        g_tt = -factor
+        g_rr = 1.0 / factor
+        g_theta_theta = r * r
+        g_phi_phi = r * r * sin_theta * sin_theta
+        
+        # Calculate spatial norm
+        spatial_norm_sq = g_rr * dr*dr + g_theta_theta * dtheta*dtheta + g_phi_phi * dphi*dphi
+        
+        # Set dt to satisfy null condition
+        dt = np.zeros_like(dr)
+        mask = spatial_norm_sq > 0
+        dt[mask] = np.sqrt(spatial_norm_sq[mask] / np.abs(g_tt[mask]))
+        
+        initial_conditions = np.stack([t, r, theta, phi, dt, dr, dtheta, dphi], axis=1)
+        return initial_conditions

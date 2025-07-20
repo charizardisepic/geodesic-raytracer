@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+.venv/
+.env/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific - debug and test files
+debug_*.py
+test_*.py
+*_analysis.py
+*_comparison.py
+analyze_*.py
+check_*.py
+research_*.py
+render_optimal*.py
+perfect_symmetry_*.py
+visualization_tools.py
+comprehensive_*.py
+accuracy_*.py
+
+# Temporary output (keep main output/ but ignore temp files)
+*.tmp
+*.temp
+temp_*
